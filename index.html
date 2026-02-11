@@ -2551,7 +2551,10 @@ window.addEventListener("resize", () => {
           return `${m}-${day}-${y}`;
         })();
 
-        const filename = `${templateInfo.prefix}_${safeFilenamePart(row["Tenant Name"])}_${safeFilenamePart(code)}_${todayShort}.docx`;
+        // Naming convention (applies to BOTH notice types):
+        // Tenant Name - Lease Expiration Notice
+        const tenantForFilename = sanitizeFilenamePart(String(row["Tenant Name"] || "").trim() || "Unknown");
+        const filename = `${tenantForFilename} - Lease Expiration Notice.docx`;
         saveAs(out, filename);
 
         toast("Lease notice generated.");
@@ -2919,10 +2922,26 @@ try {
         if (!trySetTextField(["Lease Offered to Tenants","Lease Offered to Tenant(s)","Lease Offered to Tenants:"], tenantName)) {
   throw new Error("Could not find the Lease Offered to Tenant(s) field in the PDF template.");
 }
-// C) Name(s) -> populate Property Name
-        if (!trySetTextField(["Tenant Names Please print","Tenant Name(s) (Please print)","Tenant Name(s)","Names","Name(s)","Name(s):"], propertyName)) {
-  throw new Error("Could not find the Name(s) field in the PDF template.");
-}
+// C) Page 2 - Owner/Owner Representative "Name(s)" -> Property Name (from the Property Name column)
+// IMPORTANT: The template has multiple "name" fields (e.g., tenant vs owner). We target the Owner field first.
+        let ownerUsedNames2 = false;
+        const ownerNameOk = trySetTextField(
+          ["Names","Name(s)","Name(s):","Owner Name(s)","Owner/Owner Representative Name(s)","Owner Names"],
+          propertyName
+        );
+        if (!ownerNameOk) {
+          // Last resort: some templates may use a suffixed field name
+          ownerUsedNames2 = trySetTextField(["Names_2"], propertyName);
+          if (!ownerUsedNames2) {
+            throw new Error("Could not find the Owner Name(s) field in the PDF template.");
+          }
+        }
+
+        // Keep tenant-name fields consistent if they exist on the template (safe no-op if not found)
+        trySetTextField(["Tenant Names Please print","Tenant Name(s) (Please print)","Tenant Name(s)"], tenantName);
+        // If the template uses a second "Names" field for tenant contact info, populate it with the tenant name
+        if (!ownerUsedNames2) trySetTextField(["Names_2"], tenantName);
+
 // Keep form fields editable after download (do NOT flatten)
 
         const outBytes = await pdfDoc.save();
@@ -2934,11 +2953,12 @@ try {
         const yyyy = String(today.getFullYear());
         const dateStamp = mm + "-" + dd + "-" + yyyy;
 
-        const safeProperty = sanitizeFilenamePart(property);
+        const safePropertyName = sanitizeFilenamePart(propertyName);
         const safeUnit = sanitizeFilenamePart(unit);
         const safeTenant = sanitizeFilenamePart(tenantName);
 
-        const filename = sanitizeFilenamePart(`${safeProperty} (${safeUnit} ${safeTenant}) Electronic Consent.pdf`);
+        const baseName = safeUnit ? `${safePropertyName}-${safeUnit}` : `${safePropertyName}`;
+        const filename = sanitizeFilenamePart(`${baseName} (${safeTenant}) - Electronic Consent.pdf`);
         saveAs(blob, filename);
 
         closeModal();
