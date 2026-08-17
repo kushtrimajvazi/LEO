@@ -4022,6 +4022,7 @@ body[data-theme="light"] .commDonutInner span{ color: rgba(71,85,105,.78); }
                 <input id="residentDirectoryImportInput" type="file" accept=".xlsx,.xls" style="position:absolute; left:-9999px; width:1px; height:1px; opacity:0;" onchange="handleResidentDirectoryFileChosen(event)" />
                 <button class="btn small ghost" type="button" onclick="openImportReportsModal()">Import Reports</button>
                 <button class="btn small ghost" type="button" onclick="exportWorkflowVisible()">Export workflow (Excel)</button>
+                <button class="btn small ghost" type="button" onclick="openPropertiesStringModal()">Properties String</button>
                 <button class="btn small" type="button" onclick="openBulkLeaseNoticesModal()">Generate Lease Notices</button>
               </div>
             </div>
@@ -8464,16 +8465,111 @@ function showMoreWorkflowRows(){
   scheduleTenantsRender(0);
 }
 
-function getWorkflowExportContext(){
+function buildPropertiesString(refs){
+  const values = [];
+  const seen = new Set();
+  (Array.isArray(refs) ? refs : []).forEach(ref => {
+    const row = ref?.row || [];
+    const cols = ref?.cols || {};
+    const property = (typeof cols.propertyCode === "number" && cols.propertyCode >= 0)
+      ? normalizeSingleLineText(row[cols.propertyCode] ?? "")
+      : "";
+    if(!property) return;
+    const isTremada = String(ref?.groupKey ?? "").trim().toLowerCase() === "tremada";
+    const value = isTremada ? `.${property.slice(0, 5)}` : property;
+    const uniqueKey = value.toUpperCase();
+    if(seen.has(uniqueKey)) return;
+    seen.add(uniqueKey);
+    values.push(value);
+  });
+  return values.join("^");
+}
+
+function closePropertiesStringModal(){
+  document.getElementById("propertiesStringModalBack")?.remove();
+  document.getElementById("propertiesStringModal")?.remove();
+}
+
+function openPropertiesStringModal(){
+  const ctx = getWorkflowExportContext("Properties String");
+  if(!ctx) return;
+  const propertiesString = buildPropertiesString(ctx.refs);
+  if(!propertiesString){
+    toast("Properties String", "No property codes are available in the current filtered tenant list.");
+    return;
+  }
+
+  closePropertiesStringModal();
+  const back = document.createElement("div");
+  back.id = "propertiesStringModalBack";
+  back.className = "drawerBack";
+  back.style.cssText = "display:block; z-index:94;";
+  back.onclick = closePropertiesStringModal;
+
+  const modal = document.createElement("div");
+  modal.id = "propertiesStringModal";
+  modal.className = "card";
+  modal.setAttribute("role", "dialog");
+  modal.setAttribute("aria-modal", "true");
+  modal.setAttribute("aria-labelledby", "propertiesStringModalTitle");
+  modal.style.cssText = "display:block; position:fixed; z-index:99; left:50%; top:50%; transform:translate(-50%,-50%); width:min(720px, calc(100vw - 32px)); max-height:calc(100vh - 32px); overflow:auto;";
+  const propertyCount = propertiesString.split("^").length;
+  modal.innerHTML = `
+    <div class="hd">
+      <div>
+        <h3 id="propertiesStringModalTitle">Properties String</h3>
+        <p>${propertyCount.toLocaleString("en-US")} unique propert${propertyCount === 1 ? "y" : "ies"} from the current filtered tenant list</p>
+      </div>
+      <button class="btn small ghost" type="button" onclick="closePropertiesStringModal()">Close</button>
+    </div>
+    <div class="bd">
+      <p>Use this caret-delimited string when running the property reports in Yardi.</p>
+      <textarea id="propertiesStringOutput" readonly spellcheck="false" aria-label="Properties string" style="width:100%; min-height:150px; resize:vertical; font-family:var(--mono); line-height:1.5;">${escapeHtml(propertiesString)}</textarea>
+      <div class="rowActions" style="justify-content:flex-end; margin-top:16px;">
+        <button class="btn ghost" type="button" onclick="closePropertiesStringModal()">Close</button>
+        <button class="btn" type="button" onclick="copyPropertiesString()">Copy String</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(back);
+  document.body.appendChild(modal);
+  const output = modal.querySelector("#propertiesStringOutput");
+  output?.focus();
+  output?.select();
+}
+
+async function copyPropertiesString(){
+  const output = document.getElementById("propertiesStringOutput");
+  const value = String(output?.value || "").trim();
+  if(!value){
+    toast("Properties String", "There is no properties string to copy.");
+    return;
+  }
+  try{
+    if(!navigator?.clipboard?.writeText) throw new Error("Clipboard API unavailable");
+    await navigator.clipboard.writeText(value);
+  } catch(_error){
+    const fallback = document.createElement("textarea");
+    fallback.value = value;
+    document.body.appendChild(fallback);
+    fallback.select();
+    document.execCommand("copy");
+    fallback.remove();
+  }
+  toast("Properties String", "Properties string copied to the clipboard.");
+}
+
+function getWorkflowExportContext(actionLabel="Export"){
+  const toastTitle = normalizeSingleLineText(actionLabel) || "Export";
   const hasData = excelState.loaded && excelState.sheets && Object.keys(excelState.sheets).length > 0;
   if(!hasData){
-    toast('Export', 'Upload an XLSX/CSV first.');
+    toast(toastTitle, 'Upload an XLSX/CSV first.');
     return null;
   }
 
   const refs = getWorkflowRefsFiltered();
   if(refs.length === 0){
-    toast('Export', 'No workflow rows match the current filters.');
+    toast(toastTitle, 'No workflow rows match the current filters.');
     return null;
   }
   const reportingMonthDate = (() => {
@@ -23043,6 +23139,7 @@ const filled = await pdfDoc.save({ useObjectStreams: false });
         closeDocModal();
         closeCompleteListModal();
         closeImportReportsModal();
+        closePropertiesStringModal();
         closeDrawer();
       }
     });
