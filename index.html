@@ -21694,7 +21694,7 @@ Email: leasing@bronsteinproperties.com`;
     function buildLeaseNoticeEmailBodyHtml(kind, tenantName, address, leaseTo, options = {}){
       const copy = getLeaseNoticeEmailCopy(kind, tenantName, address, leaseTo);
       const includeElectronicConsent = options?.includeElectronicConsent !== false;
-      const textStyle = "font-family:Arial, sans-serif; font-size:11pt; line-height:1.28; color:#000;";
+      const textStyle = "line-height:1.28; color:#000;";
       const renewBulletsHtml = copy.renewBulletsHtml
         .map(li => `<li style="${textStyle} margin:0 0 6pt 0;">${li}</li>`)
         .join("");
