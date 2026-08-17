@@ -2340,12 +2340,6 @@ body[data-theme="light"] .commDonutInner span{ color: rgba(71,85,105,.78); }
     .memoApp .duplicate-cell{ background-color: rgba(255,92,122,.14) !important; }
     .memoApp th.selected-col{ background-color: var(--accent-100) !important; }
     .memoApp td.selected-col{ background-color: rgba(124,92,255,.10) !important; }
-    .memoApp th[data-col="Phone Number"], .memoApp td[data-col="Phone Number"],
-    .memoApp th[data-col="Email Address"], .memoApp td[data-col="Email Address"]{
-      width:180px; min-width:180px; max-width:220px;
-      white-space: normal; word-break: normal; overflow-wrap: anywhere;
-    }
-    .memoApp td[data-col="Phone Number"], .memoApp td[data-col="Email Address"]{ padding-top:4px; padding-bottom:4px; }
     .memoApp th[data-col="Dated Memo"], .memoApp td[data-col="Dated Memo"]{
       width:auto; min-width:300px; white-space: normal; word-break: break-word; overflow-wrap: anywhere;
     }
@@ -3448,10 +3442,6 @@ body[data-theme="light"] .commDonutInner span{ color: rgba(71,85,105,.78); }
 
                 <label>Upload Memo Notes</label>
                 <input id="fileInput" type="file" accept=".xlsx,.xls,.csv">
-
-                <div style="margin-top:10px;"></div>
-                <label>Upload Resident Directory</label>
-                <input id="resDirInput" type="file" accept=".xlsx,.xls,.csv" disabled>
 
                 <div id="rowCountDisplay" class="small-note">Rows: 0</div>
               </div>
@@ -5574,6 +5564,27 @@ const PRELOADED_EXCEL_DATA = null;
     let memoStateHydrating = false;
     let memoRowSeq = 0;
 
+    const MEMO_PROCESSOR_TABLE_HEADERS = Object.freeze([
+      "#", "Tenant ID", "Property", "Unit", "Memo", "MemoDate", "Dated Memo",
+      "Memo TID", "Status", "Move In", "Lease Expires", "Rent"
+    ]);
+    const MEMO_PROCESSOR_COPY_HEADERS = Object.freeze([
+      "Tenant ID", "Property", "Unit", "MemoDate", "Dated Memo", "Memo TID",
+      "Status", "Move In", "Lease Expires", "Rent"
+    ]);
+    const MEMO_PROCESSOR_EXPORT_HEADERS = Object.freeze([
+      "Tenant ID", "Property", "Unit", "Memo", "MemoDate", "Dated Memo",
+      "Memo TID", "Status", "Move In", "Lease Expires", "Rent"
+    ]);
+
+    function memoProcessorHeaders(kind, hasJoinedRows=false) {
+      if(kind === "copy") return [...MEMO_PROCESSOR_COPY_HEADERS];
+      if(kind === "export") return [...MEMO_PROCESSOR_EXPORT_HEADERS];
+      return hasJoinedRows
+        ? [...MEMO_PROCESSOR_TABLE_HEADERS]
+        : ["Delete", ...MEMO_PROCESSOR_TABLE_HEADERS];
+    }
+
     // NEW: column header date filters state
     let dateColumnFilters = {}; // { "MemoDate": {from:Date|null, to:Date|null}, "Lease Expires": {...} }
 
@@ -5581,9 +5592,6 @@ const PRELOADED_EXCEL_DATA = null;
     // Textareas hold the *draft*; these arrays hold what's actually filtering the table.
     let appliedIncludeKeywords = [];
     let appliedExcludeKeywords = [];
-
-    // NEW: resident directory map (key: Code -> { phone, email })
-    let residentMapByCode = {};
 
     function ensureMemoRowIds(rows) {
       (rows || []).forEach(row => {
@@ -5620,10 +5628,15 @@ const PRELOADED_EXCEL_DATA = null;
       postMemoStateToParent();
     }
 
+    function isMemoProcessorContactField(key) {
+      return key === "Phone Number" || key === "Email Address";
+    }
+
     function serializeMemoRows(rows) {
       return (rows || []).map(row => {
         const out = {};
         Object.keys(row || {}).forEach(key => {
+          if(isMemoProcessorContactField(key)) return;
           const value = row[key];
           out[key] = value instanceof Date && !isNaN(value) ? { __memoDate: value.toISOString() } : value;
         });
@@ -5635,6 +5648,7 @@ const PRELOADED_EXCEL_DATA = null;
       return (rows || []).map(row => {
         const out = {};
         Object.keys(row || {}).forEach(key => {
+          if(isMemoProcessorContactField(key)) return;
           const value = row[key];
           out[key] = value && typeof value === "object" && value.__memoDate ? new Date(value.__memoDate) : value;
         });
@@ -5647,11 +5661,7 @@ const PRELOADED_EXCEL_DATA = null;
       return Boolean(
         row["Dated Memo"] ||
         row.MemoDate ||
-        row["Memo Date"] ||
-        row["Phone Number"] ||
-        row["Email Address"] ||
-        row.Phone ||
-        row.Email
+        row["Memo Date"]
       );
     }
 
@@ -5685,9 +5695,7 @@ const PRELOADED_EXCEL_DATA = null;
           "Status": row.Status || firstMatch.Status,
           "Move In": row["Move In"] || firstMatch["Move In"],
           "Lease Expires": row["Lease Expires"] || firstMatch["Lease Expires"],
-          "Rent": row.Rent || firstMatch.Rent,
-          "Phone Number": row["Phone Number"] || firstMatch["Phone Number"] || "",
-          "Email Address": row["Email Address"] || firstMatch["Email Address"] || ""
+          "Rent": row.Rent || firstMatch.Rent
         };
       });
     }
@@ -5706,7 +5714,6 @@ const PRELOADED_EXCEL_DATA = null;
         lastGroupedRows: serializeMemoRows(ensureMemoRowIds(lastGroupedRows)),
         rawRowCount: rawRows.length,
         dateColumnFilters,
-        residentMapByCode,
         savedAt: Date.now(),
       };
     }
@@ -5739,7 +5746,6 @@ const PRELOADED_EXCEL_DATA = null;
       isGrouped = !!state.isGrouped;
       lastGroupedRows = ensureMemoRowIds(reviveMemoRows(state.lastGroupedRows || []));
       dateColumnFilters = state.dateColumnFilters || {};
-      residentMapByCode = state.residentMapByCode || {};
 
       const tenantInput = document.getElementById("tenantIdInput");
       const joinedOutput = document.getElementById("joinedIdsOutput");
@@ -5887,85 +5893,6 @@ const PRELOADED_EXCEL_DATA = null;
     }
 
     document.getElementById('fileInput').addEventListener('change', handleMemoNotesFileUpload);
-
-
-    // NEW: handle Resident Directory file upload
-    document.getElementById('resDirInput').addEventListener('change', async (evt) => {
-      const f = evt.target.files[0];
-      if (!f) return;
-
-      try{
-        const buffer = await f.arrayBuffer();
-        const parsedWorkbook = await parseAoaWorkbook(buffer, { firstSheetOnly: true, label: "Resident Directory" });
-        if(!parsedWorkbook) return;
-        const firstSheetName = parsedWorkbook.sheetNames?.[0];
-
-        // Header is on 4th row => index 3; ignore first 3 rows
-        const aoa = firstSheetName ? (parsedWorkbook.sheets?.[firstSheetName]?.aoa || []) : [];
-        if (!aoa || aoa.length < 4) {
-          alert('Resident Directory appears to have fewer than 4 rows. Check the file.');
-          return;
-        }
-        const headerRow = aoa[3];
-        const dataRows  = aoa.slice(4);
-
-        const keys = headerRow.map(h => (h||'').toString().trim());
-        function findKey(...candidates) {
-          for (const cand of candidates) {
-            const lowCand = cand.toLowerCase();
-            for (const key of keys) {
-              if (key.toLowerCase() === lowCand) return key;
-            }
-          }
-          return null;
-        }
-
-        const keyMap = {
-          Code: findKey('Code','code'),
-          Resident: findKey('Resident','resident'),
-          TelOffice: findKey('Tel Num(Office)','Tel Num (Office)','Office','Tel Office'),
-          TelHome:   findKey('Tel Num(Home)','Tel Num (Home)','Home','Tel Home'),
-          TelMobile: findKey('Tel Num(Mobile)','Tel Num (Mobile)','Mobile','Tel Mobile'),
-          Email:     findKey('Email','E-mail','email')
-        };
-
-        if (!keyMap.Code)   { alert('Resident Directory: "Code" column not found.'); return; }
-        if (!keyMap.Resident){ alert('Resident Directory: "Resident" column not found.'); return; }
-
-        const map = {};
-        for (const row of dataRows) {
-          const obj = {};
-          keys.forEach((k, i) => { obj[k] = row[i] !== undefined && row[i] !== null ? String(row[i]).trim() : ""; });
-
-          const residentVal = obj[keyMap.Resident] || "";
-          if (!residentVal) continue;
-
-          const code = (obj[keyMap.Code] || "").trim();
-          if (!code) continue;
-
-          const nums = [];
-          if (keyMap.TelOffice && obj[keyMap.TelOffice]) nums.push(obj[keyMap.TelOffice].trim());
-          if (keyMap.TelHome   && obj[keyMap.TelHome])   nums.push(obj[keyMap.TelHome].trim());
-          if (keyMap.TelMobile && obj[keyMap.TelMobile]) nums.push(obj[keyMap.TelMobile].trim());
-
-          const phone = nums.filter(Boolean).join(' & ');
-          const email = keyMap.Email ? (obj[keyMap.Email] || "").trim() : "";
-
-          map[code] = { phone, email };
-        }
-
-        residentMapByCode = map;
-
-        enrichRowsWithResidentDirectory();
-        renderTable(displayedRows);
-      } catch (err) {
-        alert('Error reading Resident Directory file: ' + (err?.message || String(err)));
-      } finally {
-        try{ evt.target.value = ""; } catch(_){}
-      }
-    });
-
-
 
     function processRowsPowerQueryStyle(objects, headerRow) {
       const keys = headerRow.map(h => (h||'').toString());
@@ -6136,10 +6063,7 @@ const PRELOADED_EXCEL_DATA = null;
       table.style.tableLayout = 'auto';
       const allRows = ensureMemoRowIds(rows || []);
       const hasJoinedRows = allRows.some(row => Object.prototype.hasOwnProperty.call(row || {}, "Tenant ID"));
-      const headers = [
-        ...(hasJoinedRows ? [] : ["Delete"]),
-        "#","Tenant ID","Property","Unit","Memo","MemoDate","Dated Memo","Memo TID","Status","Move In","Lease Expires","Rent","Phone Number","Email Address"
-      ];
+      const headers = memoProcessorHeaders("table", hasJoinedRows);
       const visibleRows = allRows.slice(0, TABLE_RENDER_LIMIT);
 
 
@@ -6150,7 +6074,7 @@ const PRELOADED_EXCEL_DATA = null;
       const th = document.createElement('th');
       th.innerText = h;
 
-      // Tag column name for CSS targeting (so we can shrink Phone/Email later)
+      // Tag column name for CSS targeting.
       th.setAttribute('data-col', h);
 
       // Add calendar popup buttons for date columns
@@ -6317,7 +6241,7 @@ const PRELOADED_EXCEL_DATA = null;
         const sampleRows = Array.from(table.rows).slice(0, 80);
         for (let c = 0; c < colCount; c++) {
           const header = headerRow.cells[c]?.innerText.trim();
-          if (header === "Dated Memo" || header === "#" || header === "Memo" || header === "Phone Number" || header === "Email Address") continue;
+          if (header === "Dated Memo" || header === "#" || header === "Memo") continue;
           let maxWidth = 0;
           for (const row of sampleRows) {
             const cell = row.cells[c]; if (!cell) continue;
@@ -6336,18 +6260,9 @@ const PRELOADED_EXCEL_DATA = null;
             if (cell) cell.style.width = maxWidth + 'px';
           }
         }
-    table.querySelectorAll('th:not(.memo), td:not(.memo)').forEach(cell => {
-      // Allow wrapping for Phone Number and Email Address columns
-      const col = cell.getAttribute('data-col');
-      if (col === 'Phone Number' || col === 'Email Address') {
-        cell.style.whiteSpace = 'normal';
-        cell.style.wordBreak = 'normal';
-        cell.style.overflowWrap = 'anywhere';
-        cell.style.writingMode = 'horizontal-tb';
-      } else {
-        cell.style.whiteSpace = 'nowrap';
-      }
-    });
+        table.querySelectorAll('th:not(.memo), td:not(.memo)').forEach(cell => {
+          cell.style.whiteSpace = 'nowrap';
+        });
 
       });
       postMemoStateToParent();
@@ -6501,7 +6416,7 @@ const PRELOADED_EXCEL_DATA = null;
           const mergedDatedMemo = matches.map(r => r["Dated Memo"]).filter(Boolean).join(" & ");
           const firstMatch = matches[0];
           joinedRows.push({
-            "Tenant ID": id,                // used to join with Resident Directory Code
+            "Tenant ID": id,
             "Property": firstMatch.Property,
             "Unit": firstMatch.Unit,
             "MemoDate": firstMatch.MemoDate,
@@ -6522,13 +6437,6 @@ const PRELOADED_EXCEL_DATA = null;
       }
 
       displayedRows = joinedRows;
-
-      // Enable the Resident Directory upload now that we have Tenant IDs
-      const resInput = document.getElementById('resDirInput');
-      if (resInput) resInput.disabled = false;
-
-      // If the resident directory is already loaded, enrich immediately
-      enrichRowsWithResidentDirectory();
       renderTable(displayedRows);
       if (btn) {
         btn.disabled = false;
@@ -6565,7 +6473,7 @@ const PRELOADED_EXCEL_DATA = null;
         alert("The current processed rows only contain Tenant IDs. Upload/process memo notes first, or click Apply Join after the memo notes are loaded.");
         return;
       }
-      const ok = confirm(`Merge ${rows.length.toLocaleString()} processed row(s) into Tenant Details?\n\n• Phone & Email: filled in only when the tenant's existing value is blank.\n• Memo / Memo Date / Memo Notes: written only when there's no existing Memo Date, or when the processed Memo Date is more recent than the existing one.`);
+      const ok = confirm(`Merge ${rows.length.toLocaleString()} processed row(s) into Tenant Details?\n\nMemo / Memo Date / Memo Notes are written only when there's no existing Memo Date, or when the processed Memo Date is the same as or more recent than the existing one.`);
       if(!ok) return;
       try {
         mergeMemoRowsIntoTenants(serializeMemoRows(rows));
@@ -6603,7 +6511,7 @@ const PRELOADED_EXCEL_DATA = null;
     // ======= Copy/Export =======
     document.getElementById('copyBtn').addEventListener('click', async () => {
       if (!displayedRows || displayedRows.length === 0) { alert('No data to copy'); return; }
-      const headers = ["Tenant ID","Property","Unit","MemoDate","Dated Memo","Memo TID","Status","Move In","Lease Expires","Rent","Phone Number","Email Address"];
+      const headers = memoProcessorHeaders("copy");
 
       const lines = [headers.join('\t')];
       for (const r of displayedRows) {
@@ -6641,7 +6549,7 @@ const PRELOADED_EXCEL_DATA = null;
         return;
       }
 
-      const headers = ["Tenant ID","Property","Unit","Memo","MemoDate","Dated Memo","Memo TID","Status","Move In","Lease Expires","Rent","Phone Number","Email Address"];
+      const headers = memoProcessorHeaders("export");
 
       const escape = s => {
         if (s === null || s === undefined) return '';
@@ -6672,7 +6580,7 @@ const PRELOADED_EXCEL_DATA = null;
       }
       if(!await ensureXlsxLibrary("Export")) return;
 
-      const headers = ["Tenant ID","Property","Unit","Memo","MemoDate","Dated Memo","Memo TID","Status","Move In","Lease Expires","Rent","Phone Number","Email Address"];
+      const headers = memoProcessorHeaders("export");
 
       const aoa = [];
       aoa.push(headers);
@@ -6771,18 +6679,6 @@ const PRELOADED_EXCEL_DATA = null;
       appliedExcludeKeywords = [];
       recomputeAndRender();
     });
-
-    // NEW: add Phone Number + Email Address to displayedRows using residentMapByCode
-    function enrichRowsWithResidentDirectory() {
-      if (!displayedRows || displayedRows.length === 0) return;
-      for (const r of displayedRows) {
-        const codeKey = String(r["Tenant ID"] || r.Code || r["Memo TID"] || "").trim();   // join key: Tenant ID/Code -> Code (resident map)
-        const info = codeKey ? residentMapByCode[codeKey] : null;
-        r["Phone Number"]  = info ? info.phone : "";
-        r["Email Address"] = info ? info.email : "";
-      }
-    }
-
 
     /* ===== End inlined memo processor source ===== */
 
@@ -17310,7 +17206,6 @@ function parseCsvToMatrix(text){
         lastGroupedRows: [],
         rawRowCount: 0,
         dateColumnFilters: {},
-        residentMapByCode: {},
         savedAt: Date.now(),
       };
 
@@ -17442,19 +17337,11 @@ function parseCsvToMatrix(text){
       let rowsChanged = 0;
       let fieldsUpdated = 0;
       const changedRefIds = new Set();
-      const sourceCounts = { phone: 0, email: 0, memoDate: 0, memoNotes: 0 };
-      const skipCounts = {
-        phoneExisting: 0,
-        emailExisting: 0,
-        memoProtected: 0,
-      };
+      const sourceCounts = { memoDate: 0, memoNotes: 0 };
+      const skipCounts = { memoProtected: 0 };
       const unmatchedExamples = [];
-      const sampleSourceKeys = [];
 
       sourceRows.forEach(src => {
-        if(sampleSourceKeys.length === 0 && src && typeof src === "object"){
-          sampleSourceKeys.push(...Object.keys(src).slice(0, 14));
-        }
         const rawKey = getMemoMergeValue(src, ["Tenant ID", "Code", "Memo TID", "Tenant Code"]);
         const key = normalizeMemoMergeKey(rawKey);
         if(!key){
@@ -17485,36 +17372,6 @@ function parseCsvToMatrix(text){
           fieldsUpdated++;
         };
 
-        const isPlaceholderContact = (value) => {
-          const text = String(value ?? "").trim().toLowerCase();
-          return !text || text === "n/a" || text === "na" || text === "-" || text === "no phone" || text === "no phone number" || text === "no email";
-        };
-
-        const setIfBlank = (idx, value) => {
-          if(typeof idx !== "number" || idx < 0) return;
-          const text = String(value ?? "").trim();
-          if(!text) return;
-          const current = String(row[idx] ?? "").trim();
-          if(current) return;
-          row[idx] = text;
-          changed = true;
-          fieldsUpdated++;
-        };
-
-        const setContactIfUseful = (idx, value) => {
-          if(typeof idx !== "number" || idx < 0) return;
-          const text = String(value ?? "").trim();
-          if(!text) return;
-          const current = String(row[idx] ?? "").trim();
-          if(current === text) return;
-          if(current && !isPlaceholderContact(current)) return;
-          row[idx] = text;
-          changed = true;
-          fieldsUpdated++;
-        };
-
-        const phone = getMemoMergeText(src, ["Phone Number", "Phone", "phone", "Phone No", "Phone #"]);
-        const email = getMemoMergeText(src, ["Email Address", "Email", "email", "E-mail"]);
         const memoDate = getMemoMergeDate(src);
         const memoNotes = getMemoMergeText(src, ["Dated Memo", "Memo Notes", "Memo Note", "MemoNote", "Notes"]);
         const currentMemoDate = typeof cols.memoDate === "number" && cols.memoDate >= 0
@@ -17527,23 +17384,13 @@ function parseCsvToMatrix(text){
           || (!!sourceMemoDateObj && !currentMemoDateObj)
           || (!!sourceMemoDateObj && !!currentMemoDateObj && sourceMemoDateObj.getTime() === currentMemoDateObj.getTime())
           || (!!sourceMemoDateObj && !!currentMemoDateObj && sourceMemoDateObj.getTime() > currentMemoDateObj.getTime());
-        if(phone) sourceCounts.phone++;
-        if(email) sourceCounts.email++;
         if(memoDate) sourceCounts.memoDate++;
         if(memoNotes) sourceCounts.memoNotes++;
 
-        if(phone && typeof cols.phone === "number" && cols.phone >= 0 && String(row[cols.phone] ?? "").trim()){
-          skipCounts.phoneExisting++;
-        }
-        if(email && typeof cols.email === "number" && cols.email >= 0 && String(row[cols.email] ?? "").trim()){
-          skipCounts.emailExisting++;
-        }
         if((memoDate || memoNotes) && !canOverwriteMemoFields){
           skipCounts.memoProtected++;
         }
 
-        setContactIfUseful(cols.phone, phone);
-        setContactIfUseful(cols.email, email);
         if(memoDate && canOverwriteMemoFields){
           setIfValue(cols.memoDate, memoDate);
         }
@@ -17564,9 +17411,9 @@ function parseCsvToMatrix(text){
       renderCurrentRouteSoon(0);
 
       const exampleText = unmatchedExamples.length ? ` Examples: ${unmatchedExamples.join(", ")}.` : "";
-      const skipText = ` Filled/skipped - phone existing: ${skipCounts.phoneExisting.toLocaleString()}, email existing: ${skipCounts.emailExisting.toLocaleString()}, memo protected by tenant date: ${skipCounts.memoProtected.toLocaleString()}.`;
+      const skipText = ` Memo updates protected by a newer tenant Memo Date: ${skipCounts.memoProtected.toLocaleString()}.`;
       const sourceText = fieldsUpdated === 0
-        ? ` Source values found: phone ${sourceCounts.phone}, email ${sourceCounts.email}, memo date ${sourceCounts.memoDate}, memo notes ${sourceCounts.memoNotes}.${sampleSourceKeys.length ? " Source columns: " + sampleSourceKeys.join(", ") + "." : ""}`
+        ? ` Source values found: memo date ${sourceCounts.memoDate}, memo notes ${sourceCounts.memoNotes}.`
         : "";
       toast(
         "Memo merge complete",
