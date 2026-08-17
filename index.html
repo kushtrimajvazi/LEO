@@ -3901,7 +3901,7 @@ body[data-theme="light"] .commDonutInner span{ color: rgba(71,85,105,.78); }
                 <input id="residentDirectoryImportInput" type="file" accept=".xlsx,.xls" style="position:absolute; left:-9999px; width:1px; height:1px; opacity:0;" onchange="handleResidentDirectoryFileChosen(event)" />
                 <button class="btn small ghost" type="button" onclick="openImportReportsModal()">Import Reports</button>
                 <button class="btn small ghost" type="button" onclick="exportWorkflowVisible()">Export workflow (Excel)</button>
-                <button class="btn small" type="button" onclick="toast('How it works', 'Workflow view shows key fields from the uploaded tenant workbook. Edit tenants in Tenant Detail to update the tenant record.')">How it works</button>
+                <button class="btn small" type="button" onclick="openBulkLeaseNoticesModal()">Generate Lease Notices</button>
               </div>
             </div>
           </div>
@@ -9367,6 +9367,411 @@ async function exportWorkflowVisible(){
   document.body.appendChild(back);
   document.body.appendChild(modal);
 }
+// ----- Bulk lease notice generation -----
+const bulkLeaseNoticeState = {
+  refIds: [],
+  mode: "combined",
+  directoryHandle: null,
+  folderName: "",
+  running: false,
+  completed: false,
+  current: 0,
+  total: 0,
+  successes: [],
+  failures: [],
+  outputFilename: "",
+  error: "",
+};
+
+function resetBulkLeaseNoticeState(refs=getWorkflowRefsFiltered()){
+  const list = Array.isArray(refs) ? refs : [];
+  bulkLeaseNoticeState.refIds = list.map(ref => String(ref?.id || "")).filter(Boolean);
+  bulkLeaseNoticeState.mode = "combined";
+  bulkLeaseNoticeState.directoryHandle = null;
+  bulkLeaseNoticeState.folderName = "";
+  bulkLeaseNoticeState.running = false;
+  bulkLeaseNoticeState.completed = false;
+  bulkLeaseNoticeState.current = 0;
+  bulkLeaseNoticeState.total = bulkLeaseNoticeState.refIds.length;
+  bulkLeaseNoticeState.successes = [];
+  bulkLeaseNoticeState.failures = [];
+  bulkLeaseNoticeState.outputFilename = "";
+  bulkLeaseNoticeState.error = "";
+}
+
+function closeBulkLeaseNoticesModal(){
+  if(bulkLeaseNoticeState.running) return;
+  document.getElementById("bulkLeaseNoticesModalBack")?.remove();
+  document.getElementById("bulkLeaseNoticesModal")?.remove();
+}
+
+function setBulkLeaseNoticeMode(value){
+  if(bulkLeaseNoticeState.running) return;
+  bulkLeaseNoticeState.mode = value === "separate" ? "separate" : "combined";
+  bulkLeaseNoticeState.completed = false;
+  bulkLeaseNoticeState.successes = [];
+  bulkLeaseNoticeState.failures = [];
+  bulkLeaseNoticeState.outputFilename = "";
+  bulkLeaseNoticeState.error = "";
+  renderBulkLeaseNoticeModalState();
+}
+
+function splitPdfFilename(name){
+  const value = String(name || "Lease Notice.pdf").trim() || "Lease Notice.pdf";
+  const match = /^(.*?)(\.pdf)$/i.exec(value);
+  return match
+    ? { stem: match[1] || "Lease Notice", extension: match[2] }
+    : { stem: value, extension: ".pdf" };
+}
+
+async function bulkLeaseNoticeFileExists(directoryHandle, filename){
+  try{
+    await directoryHandle.getFileHandle(filename);
+    return true;
+  } catch(err){
+    if(err?.name === "NotFoundError") return false;
+    throw err;
+  }
+}
+
+async function findAvailablePdfFilename(directoryHandle, requestedName){
+  const parts = splitPdfFilename(requestedName);
+  let candidate = `${parts.stem}${parts.extension}`;
+  let suffix = 2;
+  while(await bulkLeaseNoticeFileExists(directoryHandle, candidate)){
+    candidate = `${parts.stem} (${suffix})${parts.extension}`;
+    suffix++;
+  }
+  return candidate;
+}
+
+async function writePdfBytesToDirectory(directoryHandle, requestedName, bytes){
+  if(!directoryHandle?.getFileHandle) throw new Error("No destination folder was selected.");
+  const filename = await findAvailablePdfFilename(directoryHandle, requestedName);
+  const fileHandle = await directoryHandle.getFileHandle(filename, { create: true });
+  const writable = await fileHandle.createWritable();
+  const payload = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes || []);
+  await writable.write(payload);
+  await writable.close();
+  return filename;
+}
+
+function getBulkLeaseNoticeCampaignLabel(){
+  const label = String(normalizedCampaignLabel || "").replace(/\s+/g, " ").trim();
+  if(/^(January|February|March|April|May|June|July|August|September|October|November|December) \d{4}$/i.test(label)){
+    return label.replace(/^./, char => char.toUpperCase());
+  }
+  const match = /^(\d{4})-(\d{2})/.exec(String(normalizedCampaignMonthStart || ""));
+  if(match){
+    const monthNames = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+    const monthIndex = Number(match[2]) - 1;
+    if(monthIndex >= 0 && monthIndex < monthNames.length) return `${monthNames[monthIndex]} ${match[1]}`;
+  }
+  return "";
+}
+
+function getBulkLeaseNoticesCombinedFilename(now=new Date()){
+  const label = getBulkLeaseNoticeCampaignLabel();
+  if(label) return `Lease Notices - ${label}.pdf`;
+  const date = now instanceof Date && !Number.isNaN(now.getTime()) ? now : new Date();
+  const yyyy = date.getFullYear();
+  const mm = String(date.getMonth() + 1).padStart(2, "0");
+  const dd = String(date.getDate()).padStart(2, "0");
+  return `Lease Notices - ${yyyy}-${mm}-${dd}.pdf`;
+}
+
+async function buildCombinedLeaseNoticesPdf(artifacts){
+  const list = (Array.isArray(artifacts) ? artifacts : []).filter(artifact => artifact?.bytes);
+  if(!list.length) throw new Error("No lease notices were available to combine.");
+  if(typeof PDFLib === "undefined" || !PDFLib?.PDFDocument) throw new Error("PDF generation library failed to load.");
+  const combined = await PDFLib.PDFDocument.create();
+  for(const artifact of list){
+    const source = await PDFLib.PDFDocument.load(artifact.bytes);
+    const indices = source.getPageIndices();
+    const pages = await combined.copyPages(source, indices);
+    pages.forEach(page => combined.addPage(page));
+  }
+  combined.setTitle("Lease Expiration Outreach");
+  combined.setSubject("Lease Expiration Outreach");
+  combined.setAuthor("Lease Expiration Outreach");
+  combined.setCreator("Lease Expiration Outreach");
+  return combined.save();
+}
+
+function bulkLeaseNoticeFailureRowsHtml(){
+  if(!bulkLeaseNoticeState.failures.length) return "";
+  const rows = bulkLeaseNoticeState.failures.map(item => `
+    <tr>
+      <td>${escapeHtml(item.tenantName || "Unknown tenant")}</td>
+      <td class="mono">${escapeHtml(item.tenantCode || "-")}</td>
+      <td>${escapeHtml(item.reason || "Unknown error")}</td>
+    </tr>
+  `).join("");
+  return `
+    <div class="bulkLeaseNoticeFailures">
+      <h4>Skipped records</h4>
+      <div class="tableWrap">
+        <table>
+          <thead><tr><th>Tenant</th><th>Code</th><th>Reason</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+    </div>
+  `;
+}
+
+function renderBulkLeaseNoticeModalState(){
+  const modal = document.getElementById("bulkLeaseNoticesModal");
+  if(!modal) return;
+  const s = bulkLeaseNoticeState;
+  const countLabel = `${s.total.toLocaleString("en-US")} filtered tenant${s.total === 1 ? "" : "s"}`;
+  const progress = s.running
+    ? `<div class="callout"><strong>Generating ${s.current.toLocaleString("en-US")} of ${s.total.toLocaleString("en-US")}...</strong><div class="muted">Keep this window open until generation finishes.</div></div>`
+    : "";
+  const result = s.completed
+    ? `<div class="callout ${s.failures.length ? "warn" : "success"}">
+        <strong>${s.successes.length.toLocaleString("en-US")} notice${s.successes.length === 1 ? "" : "s"} saved</strong>
+        <div>${s.failures.length.toLocaleString("en-US")} tenant${s.failures.length === 1 ? "" : "s"} skipped.</div>
+        <div>Folder: ${escapeHtml(s.folderName || "Selected folder")}${s.outputFilename ? `<br>File: ${escapeHtml(s.outputFilename)}` : ""}</div>
+      </div>${bulkLeaseNoticeFailureRowsHtml()}`
+    : "";
+  const error = s.error ? `<div class="callout danger">${escapeHtml(s.error)}</div>` : "";
+  const disabled = s.running ? " disabled" : "";
+  const generateDisabled = s.running || !s.directoryHandle || s.total === 0 ? " disabled" : "";
+
+  modal.innerHTML = `
+    <style>
+      #bulkLeaseNoticesModal .bulkLeaseNoticeChoices{ display:grid; gap:10px; margin:14px 0; }
+      #bulkLeaseNoticesModal .bulkLeaseNoticeChoice{ display:flex; gap:10px; align-items:flex-start; padding:12px; border:1px solid var(--border); border-radius:12px; }
+      #bulkLeaseNoticesModal .bulkLeaseNoticeChoice input{ margin-top:3px; accent-color:var(--accent); }
+      #bulkLeaseNoticesModal .bulkLeaseNoticeChoice span{ min-width:0; }
+      #bulkLeaseNoticesModal .bulkLeaseNoticeFolder{ display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin:14px 0; }
+      #bulkLeaseNoticesModal .bulkLeaseNoticeFailures{ margin-top:14px; }
+      #bulkLeaseNoticesModal .bulkLeaseNoticeFailures h4{ margin:0 0 8px; }
+      #bulkLeaseNoticesModal .bulkLeaseNoticeFailures .tableWrap{ max-height:220px; }
+      #bulkLeaseNoticesModal .callout.success{ border-color:rgba(34,197,94,.45); }
+      #bulkLeaseNoticesModal .callout.warn{ border-color:rgba(245,158,11,.50); }
+      #bulkLeaseNoticesModal .callout.danger{ border-color:rgba(244,63,94,.55); }
+    </style>
+    <div class="hd">
+      <div>
+        <h3 id="bulkLeaseNoticesModalTitle">Generate Lease Notices</h3>
+        <p>${countLabel}</p>
+      </div>
+      <button class="btn small ghost" type="button" onclick="closeBulkLeaseNoticesModal()"${disabled}>Close</button>
+    </div>
+    <div class="bd">
+      <p>Each tenant's <strong>Lease To</strong> date automatically selects the expired or upcoming notice template.</p>
+      <div class="bulkLeaseNoticeChoices" role="radiogroup" aria-label="PDF output format">
+        <label class="bulkLeaseNoticeChoice">
+          <input type="radio" name="bulkLeaseNoticeMode" value="combined"${s.mode === "combined" ? " checked" : ""} onchange="setBulkLeaseNoticeMode(this.value)"${disabled}>
+          <span><strong>One combined PDF</strong><br><span class="muted">All successful notices in the current filtered order.</span></span>
+        </label>
+        <label class="bulkLeaseNoticeChoice">
+          <input type="radio" name="bulkLeaseNoticeMode" value="separate"${s.mode === "separate" ? " checked" : ""} onchange="setBulkLeaseNoticeMode(this.value)"${disabled}>
+          <span><strong>Separate PDF files</strong><br><span class="muted">Preserves the existing individual notice filenames.</span></span>
+        </label>
+      </div>
+      <div class="bulkLeaseNoticeFolder">
+        <button class="btn small ghost" type="button" onclick="chooseBulkLeaseNoticeFolder()"${disabled}>Choose Folder</button>
+        <span class="muted">${escapeHtml(s.folderName || "No folder selected")}</span>
+      </div>
+      ${error}${progress}${result}
+      <div class="rowActions" style="justify-content:flex-end; margin-top:16px;">
+        <button class="btn ghost" type="button" onclick="closeBulkLeaseNoticesModal()"${disabled}>${s.completed ? "Close" : "Cancel"}</button>
+        ${s.completed ? "" : `<button class="btn" type="button" onclick="generateBulkLeaseNotices()"${generateDisabled}>Generate</button>`}
+      </div>
+    </div>
+  `;
+}
+
+function openBulkLeaseNoticesModal(){
+  closeBulkLeaseNoticesModal();
+  resetBulkLeaseNoticeState(getWorkflowRefsFiltered());
+
+  const back = document.createElement("div");
+  back.id = "bulkLeaseNoticesModalBack";
+  back.className = "drawerBack";
+  back.style.cssText = "display:block; z-index:94;";
+  back.onclick = closeBulkLeaseNoticesModal;
+
+  const modal = document.createElement("div");
+  modal.id = "bulkLeaseNoticesModal";
+  modal.className = "card";
+  modal.setAttribute("role", "dialog");
+  modal.setAttribute("aria-modal", "true");
+  modal.setAttribute("aria-labelledby", "bulkLeaseNoticesModalTitle");
+  modal.style.cssText = "display:block; position:fixed; z-index:99; left:50%; top:50%; transform:translate(-50%,-50%); width:min(760px, calc(100vw - 32px)); max-height:calc(100vh - 32px); overflow:auto;";
+  document.body.appendChild(back);
+  document.body.appendChild(modal);
+  renderBulkLeaseNoticeModalState();
+}
+
+async function chooseBulkLeaseNoticeFolder(){
+  if(bulkLeaseNoticeState.running) return;
+  if(typeof window.showDirectoryPicker !== "function"){
+    bulkLeaseNoticeState.error = "Direct folder saving requires a current Microsoft Edge or Chromium-based browser.";
+    renderBulkLeaseNoticeModalState();
+    return;
+  }
+  try{
+    const handle = await window.showDirectoryPicker({ mode: "readwrite" });
+    if(!handle) return;
+    bulkLeaseNoticeState.directoryHandle = handle;
+    bulkLeaseNoticeState.folderName = String(handle.name || "Selected folder");
+    bulkLeaseNoticeState.error = "";
+    bulkLeaseNoticeState.completed = false;
+  } catch(err){
+    if(err?.name !== "AbortError"){
+      bulkLeaseNoticeState.error = err?.message || "Unable to open the folder selector.";
+    }
+  }
+  renderBulkLeaseNoticeModalState();
+}
+
+function bulkLeaseNoticeTenantInfo(ref, fallbackId=""){
+  const row = ref?.row || [];
+  const cols = ref?.cols || {};
+  const clean = value => String(value ?? "").replace(/\s+/g, " ").trim();
+  return {
+    id: clean(ref?.id || fallbackId),
+    tenantName: typeof cols.tenantName === "number" ? clean(row[cols.tenantName]) : "",
+    tenantCode: typeof cols.code === "number" ? clean(row[cols.code]) : "",
+  };
+}
+
+function bulkLeaseNoticeFailure(ref, fallbackId, error){
+  const info = bulkLeaseNoticeTenantInfo(ref, fallbackId);
+  return {
+    ...info,
+    reason: String(error?.message || error || "Unknown error"),
+  };
+}
+
+function recordBulkLeaseNoticeSuccesses(successes){
+  const list = Array.isArray(successes) ? successes.filter(item => item?.ref?.id) : [];
+  if(!list.length) return;
+  const when = new Date().toISOString().slice(0,16).replace("T", " ");
+  list.forEach(item => {
+    const ref = item.ref;
+    if(!timelineByTenant[ref.id]) timelineByTenant[ref.id] = [];
+    timelineByTenant[ref.id].unshift({
+      type: "doc",
+      title: "Lease Notice (PDF)",
+      when,
+      by: currentActorName(),
+      summary: `Generated ${item.effectiveType === "expired" ? "lease expired" : "upcoming"} lease notice (PDF).`,
+    });
+  });
+  persistActiveWorkbookState();
+  queueNormalizedRefsSync(list.map(item => item.ref.id), 100);
+  if(list.some(item => item.ref.id === currentTenantId)) renderTenantDetail(currentTenantId);
+}
+
+async function generateBulkLeaseNotices(){
+  const s = bulkLeaseNoticeState;
+  if(s.running) return;
+  if(blockArchivedCampaignAction("Lease notices")) return;
+  if(!s.directoryHandle){
+    s.error = "Choose a destination folder before generating lease notices.";
+    renderBulkLeaseNoticeModalState();
+    return;
+  }
+  if(!s.refIds.length){
+    s.error = "No tenants match the current filters.";
+    renderBulkLeaseNoticeModalState();
+    return;
+  }
+
+  s.running = true;
+  s.completed = false;
+  s.current = 0;
+  s.successes = [];
+  s.failures = [];
+  s.outputFilename = "";
+  s.error = "";
+  renderBulkLeaseNoticeModalState();
+
+  const combinedEntries = [];
+  try{
+    for(let index = 0; index < s.refIds.length; index++){
+      const id = s.refIds[index];
+      const ref = workflowById[id];
+      s.current = index + 1;
+      renderBulkLeaseNoticeModalState();
+      await yieldToBrowser();
+
+      if(!ref){
+        s.failures.push(bulkLeaseNoticeFailure(null, id, new Error("Tenant record is no longer available.")));
+        continue;
+      }
+
+      try{
+        const effectiveType = detectLeaseNoticeType(ref);
+        const artifact = await buildLeaseNoticePdfArtifact(ref, effectiveType);
+        const byteLength = Number(artifact?.bytes?.byteLength ?? artifact?.bytes?.length ?? 0);
+        if(!artifact || !artifact.bytes || byteLength < 1 || !String(artifact.filename || "").trim()){
+          throw new Error("Lease notice generation returned an incomplete PDF.");
+        }
+        const entry = {
+          ...bulkLeaseNoticeTenantInfo(ref, id),
+          effectiveType: artifact.effectiveType || effectiveType,
+          filename: String(artifact.filename),
+          ref,
+        };
+        if(s.mode === "separate"){
+          entry.filename = await writePdfBytesToDirectory(s.directoryHandle, entry.filename, artifact.bytes);
+          s.successes.push(entry);
+        } else {
+          combinedEntries.push({ entry, artifact });
+        }
+      } catch(err){
+        console.error("Bulk lease notice generation skipped a tenant", id, err);
+        s.failures.push(bulkLeaseNoticeFailure(ref, id, err));
+      }
+    }
+
+    if(s.mode === "combined" && combinedEntries.length){
+      try{
+        const bytes = await buildCombinedLeaseNoticesPdf(combinedEntries.map(item => item.artifact));
+        const requestedFilename = getBulkLeaseNoticesCombinedFilename();
+        s.outputFilename = await writePdfBytesToDirectory(s.directoryHandle, requestedFilename, bytes);
+        combinedEntries.forEach(item => {
+          item.entry.filename = s.outputFilename;
+          s.successes.push(item.entry);
+        });
+      } catch(err){
+        console.error("Combined lease notice PDF could not be saved", err);
+        combinedEntries.forEach(item => {
+          s.failures.push(bulkLeaseNoticeFailure(
+            item.entry.ref,
+            item.entry.id,
+            new Error(`Combined PDF could not be saved: ${err?.message || err || "Unknown error"}`),
+          ));
+        });
+      }
+    }
+    if(s.successes.length){
+      try{
+        recordBulkLeaseNoticeSuccesses(s.successes);
+      } catch(err){
+        console.error("Lease notice files were saved but timeline recording failed", err);
+        s.error = "The PDF files were saved, but their activity history could not be updated.";
+      }
+    }
+  } finally {
+    s.running = false;
+    s.completed = true;
+    renderBulkLeaseNoticeModalState();
+    if(typeof toast === "function"){
+      toast(
+        "Lease notices complete",
+        `${s.successes.length.toLocaleString("en-US")} saved; ${s.failures.length.toLocaleString("en-US")} skipped.`,
+      );
+    }
+  }
+}
+
 // ----- Tenant report imports -----
 function closeImportReportsModal(){
   document.getElementById("importReportsModalBack")?.remove();
